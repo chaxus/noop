@@ -212,7 +212,7 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
       return later(1200, () => say({ from: "lead@studio", kind: "notice", ref: owner.ref, thread: true, text: L("Noted, I'll take that into account for this task.", "好的，这个任务里我会照这个来。") }));
     }
     if (/^(hi|hello|hey|你好|嗨|在吗)/i.test(text)) {
-      return later(900, () => say({ from: "hub", kind: "notice", ...(owner.channel ? { channel: owner.channel } : {}), text: L("Hi! This is the Noop demo. Ask the team for anything, for example \"check the website for broken links\", and watch it work.", "你好！这是 Noop 演示。随便交代一件事，比如「检查一下网站有没有死链」，看看团队怎么干活。") }));
+      return later(900, () => say({ from: "hub", kind: "system", cli: "claude", ...(owner.channel ? { channel: owner.channel } : {}), text: L("Hi! This is the Noop demo. Ask the team for anything, for example \"check the website for broken links\", and watch it work.", "你好！这是 Noop 演示。随便交代一件事，比如「检查一下网站有没有死链」，看看团队怎么干活。") }));
     }
     const title = text.split("\n")[0].replace(/[。.!！?？]+$/, "").slice(0, 60);
     later(1000, () => {

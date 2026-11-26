@@ -1080,7 +1080,7 @@ async function daemon(cfg: Cfg) {
     const room = channel ? channels().find((c) => c.slug === channel) : undefined;
     const m = { text, replyTo: reply, answered, chat: recentChat(text, { channel }), sentAt, ...(room ? { channel: { slug: room.slug, name: room.name, goal: room.goal } } : {}) };
     chatNow = { text, chat: m.chat, reply, thread, channel: room?.slug };
-    const post = (r: string, ref?: string) => appendEvent({ from: "hub", kind: "system", text: r.slice(0, 2000), ...(ref ? { ref } : {}), ...(thread ? { thread } : {}), ...(room ? { channel: room.slug } : {}) });
+    const post = (r: string, ref?: string) => appendEvent({ from: "hub", kind: "system", text: r.slice(0, 2000), cli: routerCli, ...(ref ? { ref } : {}), ...(thread ? { thread } : {}), ...(room ? { channel: room.slug } : {}) });
     let out: BrainOut;
     try {
       out = await think(m, store, model, post);

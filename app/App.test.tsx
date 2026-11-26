@@ -41,11 +41,33 @@ const prDecision = {
   options: ["A: squash 合并 https://github.com/acme/nsh/pull/747 — 进入发布", "B: 继续修改"],
 };
 
+function defaultSettings(router_cli = "claude") {
+  return {
+    current: {} as Record<string, unknown>,
+    effective: {
+      agents: [] as { id: string; clis: string[]; autonomy: string }[],
+      autonomy: "onboarding",
+      routines: [] as unknown[],
+      max_parallel: 2,
+      router_cli,
+      preference: ["claude", "codex", "cursor"],
+    },
+    options: { clis: [["claude"], ["codex"], ["cursor"]], routers: ["claude", "cursor"], autonomy: ["onboarding", "assisted", "autonomous"] },
+  };
+}
+
 function hub(posts: { text: string; reply_to?: string }[], extra: unknown[] = []) {
+  let view = defaultSettings();
   return {
     [`GET ${URL}/api/feed`]: { body: { events: [...events, ...extra] } },
     [`GET ${URL}/api/feed?*`]: { body: { events: [] } },
     [`GET ${URL}/api/status`]: { body: status },
+    [`GET ${URL}/api/settings`]: () => ({ body: view }),
+    [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
+      const p = JSON.parse(r.body!);
+      if (p.router?.cli) view = { ...view, effective: { ...view.effective, router_cli: p.router.cli }, current: { ...view.current, router: { cli: p.router.cli } } };
+      return { body: view };
+    },
     [`POST ${URL}/api/messages`]: (r: { body?: string | null }) => {
       const m = JSON.parse(r.body!);
       posts.push(m);
@@ -1442,6 +1464,65 @@ describe("keyboard", () => {
     await app.keyboard.press("escape");
     await app.waitUntil(() => !app.shows("Team settings"));
     expect(app.shows("Channel")).toBe(true);
+  });
+});
+
+describe("chat polish", () => {
+  test("a brain reply with cli shows as Chat with an engine badge, not a quiet system line", async () => {
+    const chat = { id: "brain-1", ts: ts(8), from: "hub", kind: "system", cli: "cursor", text: "Here is what the open PRs look like." };
+    const note = { id: "sys-1", ts: ts(8.5), from: "hub", kind: "system", text: "Fleet update started." };
+    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], [chat, note]), width: 1200, height: 800, platform: "macos" });
+    await app.waitFor("id:cli-badge-brain-1");
+    expect(app.shows("id:msg-brain-1")).toBe(true);
+    expect(app.shows("text:Cursor")).toBe(true);
+    expect(app.shows("Here is what the open PRs look like.")).toBe(true);
+    expect(app.shows("Fleet update started.")).toBe(true);
+    expect(app.shows("id:msg-sys-1")).toBe(false);
+  });
+
+  test("the composer engine chip switches router.cli", async () => {
+    const puts: unknown[] = [];
+    let view = defaultSettings("claude");
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos",
+      network: {
+        ...hub([]),
+        [`GET ${URL}/api/settings`]: () => ({ body: view }),
+        [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
+          const p = JSON.parse(r.body!);
+          puts.push(p);
+          if (p.router?.cli) view = { ...view, effective: { ...view.effective, router_cli: p.router.cli }, current: { ...view.current, router: { cli: p.router.cli } } };
+          return { body: view };
+        },
+      },
+    });
+    await app.waitFor("id:chat-engine");
+    await app.press("id:chat-engine");
+    await app.press("id:chat-engine-cursor");
+    await app.waitUntil(() => puts.length === 1);
+    expect(puts[0]).toEqual({ router: { cli: "cursor" } });
+    await app.waitUntil(() => app.shows("text:Cursor"));
+  });
+
+  test("Thinking… appears after a brain-bound send and clears when a cli reply arrives", async () => {
+    const posts: { text: string; reply_to?: string }[] = [];
+    const later: unknown[] = [];
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos",
+      network: {
+        ...hub(posts),
+        [`GET ${URL}/api/feed?*`]: () => ({ body: { events: later.splice(0) } }),
+      },
+    });
+    await app.waitFor("id:composer");
+    await app.type("id:composer", "summarise open pull requests");
+    await app.press("id:send");
+    await app.waitUntil(() => posts.length === 1, { timeout: 8000 });
+    await app.waitFor("id:chat-awaiting", { timeout: 3000 });
+    later.push({ id: "brain-reply", ts: new Date().toISOString(), from: "hub", kind: "system", cli: "claude", text: "Three PRs need review." });
+    await app.waitFor("Three PRs need review.", { timeout: 15_000 });
+    await app.waitUntil(() => !app.shows("id:chat-awaiting"), { timeout: 5000 });
+    expect(app.shows("id:cli-badge-brain-reply")).toBe(true);
   });
 });
 

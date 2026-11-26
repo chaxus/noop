@@ -35,6 +35,8 @@ export type Event = {
   thread?: boolean;
   /** Said in a channel (its slug): shown in that channel only, never in the main chat. */
   channel?: string;
+  /** Chat-brain reply: which engine wrote it (claude | cursor). Absent on true system notices. */
+  cli?: string;
 };
 
 export const MEDIA = join(DATA, "..", "media");
