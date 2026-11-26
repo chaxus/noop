@@ -1058,6 +1058,15 @@ function SentCheck() {
 /** A message the owner sent that the hub has not confirmed yet: it reads as sent unless delivery fails. */
 type Outgoing = { id: string; ts: string; text: string; ref: string | null; files: Attachment[]; state: "held" | "sending" | "failed"; channel?: string };
 
+/** Same gate as the hub's handleOwnerMessage: bare D-/P-/L- answers skip the chat brain. */
+function awaitsBrain(text: string, ref: string | null): boolean {
+  const m = text.match(/^\s*([DLP]-[A-Z]?\d{4})\b[\s:：,，\-]*([\s\S]*)$/);
+  const id = m?.[1] ?? (ref && /^[DLP]-[A-Z]?\d{4}$/.test(ref) ? ref : null);
+  const answer = (m ? m[2] : text).trim();
+  const words = !!id?.startsWith("P-") && !/^(all|none)\b|^[\d\s,，]+$/i.test(answer);
+  return !(id && !words);
+}
+
 /** Each agent's own color and mark, the same everywhere it appears (stable by its id). */
 const MARKS = ["★", "◆", "▲", "●", "✦", "☾", "✿", "♪"];
 /** From this window width on, the app lays out for a desktop or tablet rather than a phone. */
@@ -1419,9 +1428,10 @@ function Message(props: {
     const task = [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === e.ref);
     return [...(e.options ?? []), task?.title ?? "", ...props.hub.events().filter((x) => x.ref === e.ref && x.id !== e.id).map((x) => x.text)].join("\n");
   };
+  const chat = !!e.cli;
   const body = (
     <View style={{ gap: 10 }}>
-      <Rich text={ask ? e.text.replace(/\n*^(?:建议：|Recommended: ).*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isHub(e.from)} context={about()} />
+      <Rich text={ask ? e.text.replace(/\n*^(?:建议：|Recommended: ).*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isHub(e.from) && !chat} context={about()} />
       <If when={e.attachments?.length}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 10 }}>
           <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} siblings={e.attachments} />}</Each>
@@ -1435,7 +1445,8 @@ function Message(props: {
   const rec = recommended(e);
   // a phone has no width to spare: the avatar sits in the name's row, and the message takes the whole column
   const wide = () => windowSize().width >= WIDE;
-  if (isHub(e.from) && !ask && e.kind === "system" && !e.attachments?.length)
+  // true system notices stay quiet; brain replies carry `cli` and read as chat
+  if (isHub(e.from) && !ask && e.kind === "system" && !e.attachments?.length && !chat)
     // top-aligned on one shared line height: baseline alignment drifts once the text carries an inline chip
     return (
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 4, paddingLeft: wide() ? 50 : 0 }}>
@@ -1444,16 +1455,17 @@ function Message(props: {
       </View>
     );
   return (
-    <View testID={`msg-${e.id}`} style={{ flexDirection: "row", gap: 14, paddingVertical: 10, paddingHorizontal: 10, marginHorizontal: -10, backgroundColor: props.unread?.() ? alpha(colors.info, 0.035) : "transparent", borderRadius: radius.card, transitionProperty: "backgroundColor", transitionDuration: 240 }} onMouseEnter={() => over.set(true)} onMouseLeave={() => over.set(false)}>
+    <View testID={`msg-${e.id}`} style={{ flexDirection: "row", gap: 14, paddingVertical: 8, paddingHorizontal: 10, marginHorizontal: -10, backgroundColor: props.unread?.() ? alpha(colors.info, 0.035) : "transparent", borderRadius: radius.card, transitionProperty: "backgroundColor", transitionDuration: 240 }} onMouseEnter={() => over.set(true)} onMouseLeave={() => over.set(false)}>
       <If when={wide()}><View style={{ position: "relative", alignSelf: "flex-start" }}><Avatar testID={`avatar-column-${e.id}`} from={e.from} /></View></If>
       <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 22 }}>
           <If when={!wide()}><View style={{ position: "relative" }}><Avatar testID={`avatar-inline-${e.id}`} from={e.from} small /></View></If>
-          <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{displayName(e.from)}</Text>
+          <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{chat ? L("Chat", "聊天") : displayName(e.from)}</Text>
           <Text style={{ fontSize: 12, color: colors.faint, fontVariant: ["tabular-nums"] }}>{timeOf(e.ts)}</Text>
           <If when={props.unread?.()}>
             <View testID={`unread-dot-${e.id}`} accessibilityLabel={L("Unread", "未读")} style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: colors.info }} />
           </If>
+          {chat ? <View testID={`cli-badge-${e.id}`}><Badge label={routerLabel(e.cli!)} /></View> : null}
           {tag && !ask ? <Badge label={tag} /> : null}
           <View style={{ flex: 1 }} />
           {/* with a pointer the actions sit in the header and show on hover; a phone keeps them under the message */}
@@ -2862,6 +2874,82 @@ const ROUTER_DETAIL = (): Record<string, string> => ({
 });
 
 type DropdownOption = { id: string; label: string; detail?: string; testID?: string };
+
+/** Compact Claude/Cursor switch next to the composer attach control. */
+function ChatEngineChip(props: {
+  selected: () => string;
+  routers: () => string[];
+  installed: () => Set<string>;
+  onPick: (cli: string) => void;
+}) {
+  const selected = () => props.selected();
+  const options = () => props.routers().map((c) => ({
+    id: c,
+    label: routerLabel(c),
+    detail: props.installed().size && !props.installed().has(c)
+      ? L("Not on any online machine right now", "当前在线机器上未检测到")
+      : ROUTER_DETAIL()[c],
+    testID: `chat-engine-${c}`,
+  }));
+  return (
+    <Menu
+      align="start"
+      offset={6}
+      margin={8}
+      popupStyle={menuBox()}
+      popupStartingStyle={menuEnter()}
+      trigger={
+        <View
+          role="button"
+          testID="chat-engine"
+          accessibilityLabel={L(`Chat engine: ${routerLabel(selected())}`, `聊天引擎：${routerLabel(selected())}`)}
+          tooltip={touch ? undefined : <Tooltip label={L("Chat engine", "聊天引擎")} />}
+          hoverStyle={hovered()}
+          style={{
+            height: touch ? 32 : 28,
+            paddingHorizontal: 10,
+            borderRadius: touch ? 16 : 14,
+            alignItems: "center",
+            justifyContent: "center",
+            flexDirection: "row",
+            gap: 4,
+            backgroundColor: alpha(colors.text, 0.07),
+          }}
+        >
+          <Text style={{ fontSize: 13, fontWeight: "500", color: colors.text }}>{routerLabel(selected())}</Text>
+          <Icon name="chevron-down" size={11} tint={colors.muted} />
+        </View>
+      }
+    >
+      <MenuPanel style={{ minWidth: 220, maxWidth: 300 }}>
+        <Each of={options()}>
+          {(o) => (
+            <MenuItem
+              testID={o().testID}
+              role="menuitemradio"
+              checked={o().id === selected()}
+              onSelect={() => { if (o().id !== selected()) props.onPick(o().id); }}
+              hoverStyle={menuRowHover()}
+              style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 7, paddingHorizontal: 10, borderRadius: 6 }}
+            >
+              <View style={{ width: 14, paddingTop: 3 }}>
+                <If when={o().id === selected()}>
+                  <Icon name="check" size={13} tint={colors.text} />
+                </If>
+              </View>
+              <View style={{ flex: 1, gap: 2 }}>
+                <Text style={{ fontSize: 14, fontWeight: "500", color: colors.text }}>{o().label}</Text>
+                <If when={o().detail}>
+                  <Text style={{ fontSize: 12.5, lineHeight: 17, color: colors.muted }}>{o().detail}</Text>
+                </If>
+              </View>
+            </MenuItem>
+          )}
+        </Each>
+      </MenuPanel>
+    </Menu>
+  );
+}
 
 /** A labelled value that opens a menu of its choices (each with a line saying what it means). */
 function Dropdown(props: { label: string; value: string; options: DropdownOption[]; selected: string; onPick: (id: string) => void; testID?: string }) {
@@ -4764,6 +4852,7 @@ const CHANNEL: Route = { name: "channel" };
 function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => void; onDisconnect: () => void; onTray?: (chat: TrayChat | null) => void }) {
   const hub = props.hub;
   const settings = createSettings(hub);
+  settings.load();
   const push = createPush(hub, settings.toast.show);
   const reads = createMessageReads(hub);
   const channels = createChannels(hub, reads);
@@ -4954,13 +5043,39 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   });
   // List diffs its items by identity: rebuilt rows would read as all replaced on every new message,
   // losing their measurements and the reader's place. Reuse each row while its event is the same.
-  type TimelineRow = Row | { key: string; unread: true } | { key: string; more: number } | { key: string; head: string };
+  type TimelineRow = Row | { key: string; unread: true } | { key: string; more: number } | { key: string; head: string } | { key: string; awaiting: true };
   /** The newest messages shown; older ones wait behind「加载更早的消息」so the list stays short. */
   const PAGE = 200;
   const limit = signal(PAGE);
   let built = new Map<string, TimelineRow>();
   let timelineWindow = createTimelineWindow(PAGE);
   const UNREAD: TimelineRow = { key: "unread", unread: true };
+  const AWAITING: TimelineRow = { key: "awaiting", awaiting: true };
+  /** After a brain-bound send: show Thinking… until a reply lands (same channel) or this times out. */
+  const awaitingReply = signal<{ scope: string | null; since: string } | null>(null);
+  let awaitingTimer: ReturnType<typeof setTimeout> | undefined;
+  cleanup(() => clearTimeout(awaitingTimer));
+  function startAwaiting(channel: string | null | undefined) {
+    clearTimeout(awaitingTimer);
+    awaitingReply.set({ scope: channel ?? null, since: new Date().toISOString() });
+    awaitingTimer = setTimeout(() => awaitingReply.set(null), 90_000);
+  }
+  function clearAwaiting() {
+    clearTimeout(awaitingTimer);
+    awaitingReply.set(null);
+  }
+  effect(() => {
+    const wait = awaitingReply();
+    if (!wait) return;
+    const slug = wait.scope;
+    const hit = hub.events().some((e) => {
+      if (e.ts <= wait.since) return false;
+      if ((e.channel ?? null) !== slug) return false;
+      if (e.cli) return true;
+      return isHub(e.from) && (e.kind === "system" || e.kind === "notice");
+    });
+    if (hit) clearAwaiting();
+  });
   const timeline = computed((): TimelineRow[] => {
     const d = divider();
     const next = new Map<string, TimelineRow>();
@@ -4988,6 +5103,11 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       const r = keep ? old : row;
       next.set(r.key, r);
       out.push(r);
+    }
+    const wait = awaitingReply();
+    if (wait && wait.scope === (slug ?? null)) {
+      next.set(AWAITING.key, AWAITING);
+      out.push(AWAITING);
     }
     built = next;
     return out;
@@ -5164,6 +5284,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       markSent(await hub.send(text, ref, files, false, id, channel));
       delivered.update((d) => [...d.slice(-50), o]); // until the hub's own event arrives
       outbox.update((o) => o.filter((x) => x.id !== id));
+      if (awaitsBrain(text, ref)) startAwaiting(channel);
     } catch {
       outbox.update((o) => o.map((x) => (x.id === id ? { ...x, state: "failed" } : x)));
     }
@@ -5612,6 +5733,10 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     <Mark size={44} />
                     <Text style={{ fontSize: 30, fontWeight: "600", color: colors.text, letterSpacing: -0.4 }}>{greeting()}</Text>
                     <Text style={{ fontSize: 16, lineHeight: 24, color: colors.muted, textAlign: "center" }}>{L("The team works in the background. Decisions that need you appear here.", "团队在后台运转。需要你拍板的事会出现在这里。")}</Text>
+                    <Text style={{ fontSize: 14, lineHeight: 20, color: colors.faint, textAlign: "center", maxWidth: 360 }}>
+                      {L(`${routerLabel(settings.view()?.effective.router_cli ?? "claude")} answers in chat — switch it from the chip next to the composer.`,
+                        `聊天由 ${routerLabel(settings.view()?.effective.router_cli ?? "claude")} 即时回复 — 点输入框旁的引擎可切换。`)}
+                    </Text>
                     <If when={!touch}>
                       <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8 }}>
                         <Kbd keys="/" />
@@ -5656,6 +5781,23 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                           <View style={{ flex: 1, height: 1, backgroundColor: alpha(colors.danger, 0.14) }} />
                           <Text style={{ fontSize: 12, fontWeight: "500", color: alpha(colors.danger, 0.8) }}>{L("New messages", "以下为新消息")}</Text>
                           <View style={{ flex: 1, height: 1, backgroundColor: alpha(colors.danger, 0.14) }} />
+                        </View>
+                      );
+                    }
+                    if ("awaiting" in row) {
+                      const engine = routerLabel(settings.view()?.effective.router_cli ?? "claude");
+                      return (
+                        <View testID="chat-awaiting" style={{ flexDirection: "row", gap: 14, paddingVertical: 8, paddingHorizontal: 10, marginHorizontal: -10, opacity: reduceMotion() ? 1 : 0.92 }}>
+                          <If when={wide()}><Avatar from="hub" /></If>
+                          <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
+                            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, minHeight: 22 }}>
+                              <If when={!wide()}><Avatar from="hub" small /></If>
+                              <Text style={{ fontSize: 14, fontWeight: "600", color: colors.text }}>{L("Chat", "聊天")}</Text>
+                              <Badge label={engine} />
+                              <Indicator status="running" />
+                            </View>
+                            <Text style={{ fontSize: 15, lineHeight: 22, color: colors.muted }}>{L("Thinking…", "思考中…")}</Text>
+                          </View>
                         </View>
                       );
                     }
@@ -5935,6 +6077,12 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     >
                       <Icon name="plus" size={touch ? 22 : 18} tint={colors.text} />
                     </View>
+                    <ChatEngineChip
+                      selected={() => settings.view()?.effective.router_cli ?? "claude"}
+                      routers={() => settings.view()?.options.routers ?? ["claude", "cursor"]}
+                      installed={() => new Set((hub.status()?.hosts ?? []).flatMap((h) => h.clis ?? h.caps?.filter((c) => c.startsWith("cli:")).map((c) => c.slice(4)) ?? []))}
+                      onPick={(cli) => void settings.save(patches.router(cli))}
+                    />
                     <If when={speech() !== "off"}>
                       <Text testID="dictating" style={{ fontSize: 13, color: colors.accent, numberOfLines: 1 }}>
                         {speech() === "on" ? L("Listening…", "正在听…") : L("Recognizing…", "正在识别…")}

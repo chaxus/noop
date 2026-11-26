@@ -17,6 +17,8 @@ export type HubEvent = {
   thread?: boolean;
   /** Said in a channel (its slug): shown there only, never in the main chat. */
   channel?: string;
+  /** Chat-brain reply: which engine wrote it (claude | cursor). Absent on true system notices. */
+  cli?: string;
   options?: string[];
   attachments?: string[];
 };

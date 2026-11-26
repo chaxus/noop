@@ -23,6 +23,16 @@ describe("demo server", () => {
     expect(frames.some((f) => f.includes("$status"))).toBe(true);
   });
 
+  test("a greeting reply is tagged with the chat engine", async () => {
+    const hub = createDemoHub({ pace: 0 });
+    await hub.handle("POST", "/api/auth/verify", { code: "x", totp: "000000" });
+    await hub.handle("POST", "/api/messages", { text: "hello" });
+    const feed = (await hub.handle("GET", "/api/feed")).data as { events: { cli?: string; text: string; kind: string }[] };
+    const hi = feed.events.find((e) => e.text.includes("Noop demo") || e.text.includes("Noop 演示"));
+    expect(hi?.cli).toBe("claude");
+    expect(hi?.kind).toBe("system");
+  });
+
   test("answering the open decision closes it", async () => {
     const hub = createDemoHub({ pace: 0 });
     expect(hub.status().decisions.map((d) => d.id)).toEqual(["D-0041", "P-0007"]);
