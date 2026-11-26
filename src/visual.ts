@@ -151,6 +151,9 @@ export async function doctor() {
     if (!ok) missing.push(b);
     console.log(`${ok ? "✔" : "✘"} ${b.padEnd(12)} ${why}`);
   }
+  const { cliExecutable } = await import("./core");
+  const cursor = cliExecutable("cursor");
+  console.log(`${cursor ? "✔" : "✘"} ${"cursor".padEnd(12)} agent (${cursor ?? "cursor-agent / agent"})`);
   console.log(`visual backend: ${backendFor()}`);
   if (missing.length && process.platform === "linux" && Bun.which("pacman"))
     console.log(`\ninstall:  sudo pacman -S --needed ${missing.filter((m) => !["claude", "codex", "bun"].includes(m)).map((m) => m === "Xvfb" ? "xorg-server-xvfb" : m === "script" ? "util-linux" : m === "gh" ? "github-cli" : m).join(" ")}`);

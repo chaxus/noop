@@ -12,7 +12,7 @@ import { type Account, accountEnv, accounts, claudeAuthArgs, classify, reportFai
 import { channelPrompt } from "./channels";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
-import { DATA, HOME_DIR, L, P, loadConfig, _commitPush, _pull, journal, locked, now, readDoc, writeDoc } from "./core";
+import { DATA, HOME_DIR, L, P, cliExecutable, loadConfig, _commitPush, _pull, journal, locked, now, readDoc, writeDoc } from "./core";
 import { type Ev, type FileRow, type ToolStore, type WriteOp, isWrite, listDecisions, listRoutines, listTasks, similarOpenTasks, editMemoryEntry, runTool, toolsFor, writeOp } from "../cloud/src/tools";
 
 // ---------------------------------------------------------------- the local tool store (the data repo on this machine)
@@ -213,11 +213,69 @@ export class ClaudeModel implements Model {
   }
 }
 
+/** Cursor Agent in ask/print mode: one process per turn (no warm stdin protocol). Returns text for parseTurn. */
+export class CursorModel implements Model {
+  constructor(private model = "", private timeoutMs = 45_000) {}
+  warm(_system: string) {} // print mode is one-shot; nothing to pre-spawn
+  async open(system: string) {
+    const bin = cliExecutable("cursor");
+    if (!bin) throw new Error("Cursor Agent CLI not found (install cursor-agent or agent)");
+    const history: { role: "user" | "assistant"; text: string }[] = [];
+    return {
+      send: async (text: string) => {
+        const prompt = [
+          system,
+          history.length ? `Conversation so far:\n${history.map((h) => `${h.role}: ${h.text}`).join("\n\n")}` : "",
+          `User:\n${text}`,
+          "Reply with exactly one JSON object as specified in the system prompt, and nothing else.",
+        ].filter(Boolean).join("\n\n");
+        const cmd = [bin, "--print", "--mode", "ask", "--trust", "--output-format", "text", "--workspace", BRAIN_DIR];
+        if (this.model) cmd.push("--model", this.model);
+        cmd.push(prompt);
+        mkdirSync(BRAIN_DIR, { recursive: true });
+        const proc = Bun.spawn(cmd, { cwd: BRAIN_DIR, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: { ...process.env } });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timed = Promise.race([
+          Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]),
+          new Promise<never>((_, rej) => { timer = setTimeout(() => { proc.kill(); rej(new Error("model timeout")); }, this.timeoutMs); }),
+        ]).finally(() => clearTimeout(timer));
+        const [out, err, code] = await timed as [string, string, number];
+        if (code) throw new Error(err.trim() || out.trim() || `cursor agent exited ${code}`);
+        const reply = out.trim();
+        if (!reply) throw new Error(err.trim() || "empty cursor response");
+        history.push({ role: "user", text }, { role: "assistant", text: reply });
+        return reply;
+      },
+      close: () => {},
+    };
+  }
+}
+
+/** Build the chat Model for `router.cli` (claude or cursor). */
+export function routerModel(cfg: { router?: { cli?: string; model?: string; timeout_seconds?: number; fallback?: string[] } }): Model {
+  const cli = String(cfg.router?.cli ?? "claude");
+  const timeout = (cfg.router?.timeout_seconds ?? 45) * 1000;
+  const model = String(cfg.router?.model ?? (cli === "cursor" ? "" : "claude-haiku-5-5"));
+  const fallbackNames: string[] = Array.isArray(cfg.router?.fallback) ? cfg.router!.fallback!.map(String) : (cli === "cursor" ? [] : ["claude-sonnet-5-5"]);
+  if (cli === "cursor") {
+    const primary = new CursorModel(model, timeout);
+    const rest = fallbackNames.map((n) => new CursorModel(n, timeout));
+    return rest.length ? new FallbackModel([primary, ...rest]) : primary;
+  }
+  const primary = new ClaudeModel(model || "claude-haiku-5-5", "claude", timeout);
+  return new FallbackModel([primary, ...fallbackNames.map((n) => new ClaudeModel(n, "claude", timeout))],
+    (from, err) => console.error(`chat brain: model ${from === 0 ? (model || "claude-haiku-5-5") : fallbackNames[from - 1]} failed (${err}); trying the next one`));
+}
+
 /** Tries each model in turn: when one fails mid-conversation (timeout, quota, logged out, process died), the next one
  * gets a fresh process, the turns so far are replayed, and the failing turn is sent again. Only when every model fails
  * does the error reach the caller (which then routes the message to the lead without a model). */
 export class FallbackModel implements Model {
   constructor(private models: Model[], private onFallback?: (from: number, err: unknown) => void, private canFallback: (err: unknown) => boolean = () => true) {}
+  warm(system: string) {
+    const m = this.models[0] as Model & { warm?: (s: string) => void };
+    m.warm?.(system);
+  }
   async open(system: string) {
     const sent: string[] = [];
     let i = 0;

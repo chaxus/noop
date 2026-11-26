@@ -319,15 +319,26 @@ export type SettingsView = {
     media_days?: number;
     /** Machines and their task priority (higher takes tasks first; 0 by default). */
     hosts?: { host: string; priority: number }[];
+    /** Chat brain: claude | cursor. */
+    router_cli?: string;
+    /** Default task CLI order when cli=auto. */
+    preference?: string[];
   };
-  options: { clis: string[][]; autonomy: string[] };
+  options: { clis: string[][]; autonomy: string[]; routers?: string[] };
 };
 
 const CLI_LABELS = (): Record<string, string> => ({
   claude: L("Claude only", "仅 Claude"),
+  codex: L("Codex only", "仅 Codex"),
+  cursor: L("Cursor only", "仅 Cursor"),
   "codex,claude": "Codex → Claude",
   "claude,codex": "Claude → Codex",
-  codex: L("Codex only", "仅 Codex"),
+  "cursor,claude": "Cursor → Claude",
+  "claude,cursor": "Claude → Cursor",
+  "cursor,codex": "Cursor → Codex",
+  "codex,cursor": "Codex → Cursor",
+  "claude,codex,cursor": "Claude → Codex → Cursor",
+  "cursor,claude,codex": "Cursor → Claude → Codex",
 });
 export const cliKey = (clis: string[]) => clis.join(",");
 export const cliLabel = (clis: string[]) => CLI_LABELS()[cliKey(clis)] ?? clis.join(" → ");
@@ -335,7 +346,7 @@ const AUTONOMY_LABELS = (): Record<string, string> => ({ onboarding: L("Onboardi
 export const autonomyLabel = (a: string) => AUTONOMY_LABELS()[a] ?? a;
 export const INTERVALS = ["15m", "30m", "1h", "2h", "6h", "1d"];
 const DAYS: Record<string, [string, string]> = { MON: ["Mon", "一"], TUE: ["Tue", "二"], WED: ["Wed", "三"], THU: ["Thu", "四"], FRI: ["Fri", "五"], SAT: ["Sat", "六"], SUN: ["Sun", "日"] };
-/** A routine's schedule in words: "30m" → 每 30 分钟, "weekly FRI 17:00" → 每周五 17:00. */
+/** A routine's schedule in words: "30m" → 每 30 分钟，"weekly FRI 17:00" → 每周五 17:00. */
 export function everyLabel(every: string): string {
   const e = every.trim();
   let m = e.match(/^(\d+)\s*([mhd])$/);
@@ -361,6 +372,10 @@ export const mediaDaysOf = (v: SettingsView | null | undefined): number => {
 
 export const patches = {
   clis: (agent: string, clis: string[]) => ({ clis: { agents: { [agent]: clis } } }),
+  /** Fleet-wide default CLI order for unpinned tasks. */
+  preference: (clis: string[]) => ({ clis: { preference: clis } }),
+  /** Chat brain engine (browser / app instant replies). */
+  router: (cli: string) => ({ router: { cli } }),
   autonomy: (agent: string, level: string) => ({ autonomy: { agents: { [agent]: level } } }),
   routine: (name: string, change: { enabled?: boolean; every?: string }) => ({ routines: { [name]: change } }),
   maxParallel: (n: number) => ({ host: { max_parallel: n } }),
@@ -369,6 +384,12 @@ export const patches = {
   /** The whole list: an array replaces the saved one. */
   commands: (list: Command[]) => ({ commands: list }),
 };
+
+const ROUTER_LABELS = (): Record<string, string> => ({
+  claude: "Claude",
+  cursor: "Cursor",
+});
+export const routerLabel = (cli: string) => ROUTER_LABELS()[cli] ?? cli;
 
 // ---------------------------------------------------------------- commands (typed after "/" in the composer)
 

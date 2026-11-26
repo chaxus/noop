@@ -469,10 +469,10 @@ describe("channel", () => {
     await app.waitFor("id:task-talk");
     await app.type("id:task-composer", "草稿");
     await app.keyboard.press("a");
-    await app.waitUntil(() => app.value("id:task-composer") === "草稿a");
+    await app.waitUntil(() => app.value("id:task-composer") === "草稿 a");
     await app.drag("text:手机上也正常，截图附上", { x: 40, y: 0 });
     await app.keyboard.press("b");
-    expect(app.value("id:task-composer")).toBe("草稿a");
+    expect(app.value("id:task-composer")).toBe("草稿 a");
     await app.press("id:doc-attachment");
     await app.waitUntil(() => app.shows("text:Copy works on every page."));
     await app.type("id:task-composer", "草稿");
@@ -581,7 +581,7 @@ describe("channel", () => {
 
   test("a paragraph links each PR once: the bare URL after its ref is dropped", async () => {
     const thread = [
-      { id: "e10", ts: ts(10), from: "reviewer@linux-box", kind: "notice", text: "已评审 NSH #1394 https://github.com/acme/nsh/pull/1394 ，没发现问题。" },
+      { id: "e10", ts: ts(10), from: "reviewer@linux-box", kind: "notice", text: "已评审 NSH #1394 https://github.com/acme/nsh/pull/1394，没发现问题。" },
     ];
     const app = await open("./App.tsx", { storage: STORAGE, network: hub([], thread), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("text:NSH #1394");
@@ -784,7 +784,7 @@ describe("channel", () => {
     expect(app.shows("Search")).toBe(false); // no separate button: Return searches
     await app.type("id:task-search", "旧任务 70");
     await app.submit("id:task-search");
-    await app.waitFor("1 task matches “旧任务 70”");
+    await app.waitFor("1 task matches“旧任务 70”");
     expect(app.shows("旧任务 0")).toBe(false);
     await app.press("id:task-search-clear");
     await app.waitFor("旧任务 0");
@@ -1455,8 +1455,10 @@ describe("team settings", () => {
         autonomy: "onboarding",
         routines: [{ name: "triage-inbound", desc: "扫描收件箱", every: "30m", agent: "lead", enabled: true }],
         max_parallel: 4,
+        router_cli: "claude",
+        preference: ["claude", "codex"],
       },
-      options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
+      options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"], ["cursor"]], routers: ["claude", "cursor"], autonomy: ["onboarding", "assisted", "autonomous"] },
     };
     const app = await open("./App.tsx", {
       storage: STORAGE,
@@ -1469,7 +1471,9 @@ describe("team settings", () => {
         [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
           const p = JSON.parse(r.body!);
           puts.push(p);
-          if (p.clis) view = { ...view, effective: { ...view.effective, agents: [{ ...view.effective.agents[0], clis: p.clis.agents.reporter }] } };
+          if (p.router?.cli) view = { ...view, effective: { ...view.effective, router_cli: p.router.cli } };
+          if (p.clis?.preference) view = { ...view, effective: { ...view.effective, preference: p.clis.preference } };
+          if (p.clis?.agents) view = { ...view, effective: { ...view.effective, agents: [{ ...view.effective.agents[0], clis: p.clis.agents.reporter }] } };
           if (p.host) view = { ...view, effective: { ...view.effective, max_parallel: p.host.max_parallel } };
           return { body: view };
         },
@@ -1478,10 +1482,17 @@ describe("team settings", () => {
     await app.press("id:user-menu");
     await app.press("id:settings");
     await app.press("id:settings-tab-members");
+    await app.waitFor("id:router-cli");
+    await app.press("id:router-cli");
+    await app.press("id:router-cli-cursor");
+    await app.waitUntil(() => puts.length === 1);
+    await app.press("id:cli-preference");
+    await app.press("id:cli-preference-cursor");
+    await app.waitUntil(() => puts.length === 2);
     await app.waitFor("id:cli-reporter");
     await app.press("id:cli-reporter");
     await app.press("id:cli-reporter-claude");
-    await app.waitUntil(() => puts.length === 1);
+    await app.waitUntil(() => puts.length === 3);
     await app.press("id:autonomy-reporter");
     await app.press("id:autonomy-reporter-assisted");
     await app.press("id:settings-tab-routines");
@@ -1492,8 +1503,10 @@ describe("team settings", () => {
     await app.press("id:every-triage-inbound-1h");
     await app.press("id:settings-tab-parallel");
     await app.press("id:parallel-inc");
-    await app.waitUntil(() => puts.length === 5);
+    await app.waitUntil(() => puts.length === 7);
     expect(puts).toEqual([
+      { router: { cli: "cursor" } },
+      { clis: { preference: ["cursor"] } },
       { clis: { agents: { reporter: ["claude"] } } },
       { autonomy: { agents: { reporter: "assisted" } } },
       { routines: { "triage-inbound": { enabled: false } } },
