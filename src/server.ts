@@ -237,7 +237,19 @@ export function status() {
 }
 
 // ---------------------------------------------------------------- settings (UI-adjustable, shared via data repo)
-const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "resources", "notify_prefs", "commands", "media_days", "mcp_servers", "fleet"]; // whitelisted (fleet: only host_priority) top-level keys
+const SETTABLE = ["clis", "autonomy", "routines", "host", "idle", "judge", "router", "resources", "notify_prefs", "commands", "media_days", "mcp_servers", "fleet"]; // whitelisted (fleet: only host_priority) top-level keys
+
+/** Member / default CLI menus shown in Settings (includes Cursor). */
+export const SETTINGS_CLI_OPTIONS: string[][] = [
+  ["claude"], ["codex"], ["cursor"],
+  ["codex", "claude"], ["claude", "codex"],
+  ["cursor", "claude"], ["claude", "cursor"],
+  ["cursor", "codex"], ["codex", "cursor"],
+  ["claude", "codex", "cursor"], ["cursor", "claude", "codex"],
+];
+
+/** Chat-brain CLI choices (single engine). */
+export const SETTINGS_ROUTER_OPTIONS = ["claude", "cursor"] as const;
 
 /** What an agent is for, from its profile's first line: "# Name (中文名) — what it does". */
 /** Chinese titles and one-liners for the built-in roles (a profile's own Chinese "(标题)" and text still win where present). */
@@ -294,6 +306,10 @@ const routineDesc = (r: any) =>
 export function settingsView() {
   const cfg = loadConfig();
   const agents = readdirSync(P("agents"), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  const preference = Array.isArray(cfg.clis?.preference) && cfg.clis.preference.length
+    ? cfg.clis.preference.map(String)
+    : ["claude", "codex", "cursor"];
+  const routerCli = String(cfg.router?.cli ?? "claude");
   return {
     current: existsSync(P("settings.json")) ? JSON.parse(readFileSync(P("settings.json"), "utf8")) : {},
     effective: {
@@ -303,8 +319,16 @@ export function settingsView() {
       max_parallel: cfg.host?.max_parallel ?? null,
       media_days: mediaDays(cfg),
       hosts: knownHosts().map((host) => ({ host, priority: hostPriority(cfg, host) })),
+      /** Chat brain CLI (browser / app instant replies). */
+      router_cli: routerCli === "cursor" ? "cursor" : "claude",
+      /** Fleet default when a task's cli is auto and the member has no pin. */
+      preference,
     },
-    options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
+    options: {
+      clis: SETTINGS_CLI_OPTIONS,
+      routers: [...SETTINGS_ROUTER_OPTIONS],
+      autonomy: ["onboarding", "assisted", "autonomous"],
+    },
   };
 }
 
@@ -322,6 +346,17 @@ export async function saveSettings(patch: Record<string, unknown>) {
     return o;
   };
   const clean = Object.fromEntries(Object.entries(patch).filter(([k]) => SETTABLE.includes(k)));
+  if ("router" in clean) {
+    const cli = String((clean.router as any)?.cli ?? "");
+    clean.router = { cli: cli === "cursor" ? "cursor" : "claude" };
+  }
+  if ("clis" in clean && clean.clis && typeof clean.clis === "object") {
+    const c = clean.clis as Record<string, unknown>;
+    if ("preference" in c) {
+      const pref = Array.isArray(c.preference) ? c.preference.map(String).filter((x) => ["claude", "codex", "cursor"].includes(x)) : [];
+      if (pref.length) c.preference = pref; else delete c.preference;
+    }
+  }
   if ("fleet" in clean) {
     // only the machine priority is set from the app; other [fleet] keys (primary, …) stay in config.toml
     const table = (clean.fleet as any)?.host_priority;

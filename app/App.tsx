@@ -164,6 +164,7 @@ import {
   autonomyLabel,
   cliKey,
   cliLabel,
+  routerLabel,
   intervalsWith,
   activityLine,
   everyLabel,
@@ -1705,7 +1706,7 @@ function ChannelHeader(props: { channels: Channels; slug: string }) {
   );
 }
 
-/** 全部任务: every task the team has, newest first, a page at a time. */
+/** 全部任务：every task the team has, newest first, a page at a time. */
 function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => void }) {
   const tasks = signal<TaskInfo[]>([]);
   const total = signal<number | null>(null);
@@ -1751,7 +1752,7 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
         <If when={searched() && total() !== null && !error()}>
           <Text style={{ fontSize: 13, color: colors.faint }}>
             {total() === 0
-              ? L(`No tasks match “${searched()}”`, `没有与“${searched()}”匹配的任务`)
+              ? L(`No tasks match“${searched()}”`, `没有与“${searched()}”匹配的任务`)
               : L(`${total()} ${total() === 1 ? "task matches" : "tasks match"} “${searched()}”`, `${total()} 个任务与“${searched()}”匹配`)}
           </Text>
         </If>
@@ -2851,10 +2852,14 @@ const AUTONOMY_DETAIL = (): Record<string, string> => ({
 });
 const cliDetail = (c: string[]) => {
   const name = (x: string) => cliLabel([x]).replace(/^(仅|only)\s*/i, "");
-  return c.length === 1
-    ? L(`Only ${name(c[0]!)}`, `只用 ${name(c[0]!)}`)
-    : L(`${name(c[0]!)} first, then ${name(c[1]!)} on failure or when out of quota`, `先用 ${name(c[0]!)}，失败或额度用尽时换 ${name(c[1]!)}`);
+  if (c.length === 1) return L(`Only ${name(c[0]!)}`, `只用 ${name(c[0]!)}`);
+  if (c.length === 2) return L(`${name(c[0]!)} first, then ${name(c[1]!)} on failure or when out of quota`, `先用 ${name(c[0]!)}，失败或额度用尽时换 ${name(c[1]!)}`);
+  return L(`${c.map(name).join(" → ")} (failover order)`, `${c.map(name).join(" → ")}（失败时按此顺序切换）`);
 };
+const ROUTER_DETAIL = (): Record<string, string> => ({
+  claude: L("Instant chat replies via the local Claude CLI", "聊天即时回复走本机 Claude CLI"),
+  cursor: L("Instant chat replies via Cursor Agent (ask/print mode)", "聊天即时回复走 Cursor Agent（ask/print）"),
+});
 
 type DropdownOption = { id: string; label: string; detail?: string; testID?: string };
 
@@ -3129,11 +3134,19 @@ function createSettings(hub: Hub) {
     return result;
   }
   function displayed(v: SettingsView): SettingsView {
-    const current = v.current as { clis?: { agents?: Record<string, string[]> }; autonomy?: { agents?: Record<string, string> }; routines?: Record<string, { enabled?: boolean; every?: string }>; host?: { max_parallel?: number } };
+    const current = v.current as {
+      clis?: { agents?: Record<string, string[]>; preference?: string[] };
+      autonomy?: { agents?: Record<string, string> };
+      routines?: Record<string, { enabled?: boolean; every?: string }>;
+      host?: { max_parallel?: number };
+      router?: { cli?: string };
+    };
     return { ...v, effective: { ...v.effective,
       agents: v.effective.agents.map((a) => ({ ...a, clis: current.clis?.agents?.[a.id] ?? a.clis, autonomy: current.autonomy?.agents?.[a.id] ?? a.autonomy })),
       routines: v.effective.routines.map((r) => ({ ...r, ...current.routines?.[r.name] })),
       max_parallel: current.host?.max_parallel ?? v.effective.max_parallel,
+      router_cli: current.router?.cli ?? v.effective.router_cli,
+      preference: current.clis?.preference ?? v.effective.preference,
     } };
   }
   function refresh() {
@@ -3279,6 +3292,40 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
           {(e) => (
             <View style={{ gap: 28 }}>
               <If when={on("members")}>
+              <Group title={L("Chat assistant", "聊天助手")} hint={L("Which engine answers in the browser and app chat. Tasks can still use another model below.", "浏览器和 App 里即时回复用哪套引擎；下面的任务模型可以另选。")}>
+                <SettingsItem first style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch" }}>
+                  <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                    <Text style={{ fontSize: 15.5, fontWeight: "600", color: colors.text }}>{L("Engine", "引擎")}</Text>
+                    <Text style={{ fontSize: 13.5, lineHeight: 19, color: colors.muted }}>{L("Needs the matching CLI on the primary (claude or cursor-agent).", "主控机上需装好对应 CLI（claude 或 cursor-agent）。")}</Text>
+                  </View>
+                  <View style={{ paddingLeft: props.wide ? 0 : 0 }}>
+                    <Dropdown
+                      testID="router-cli"
+                      label={L("Chat", "聊天")}
+                      value={routerLabel(e().router_cli ?? "claude")}
+                      options={(view()!.options.routers ?? ["claude", "cursor"]).map((c) => ({ id: c, label: routerLabel(c), detail: ROUTER_DETAIL()[c], testID: `router-cli-${c}` }))}
+                      selected={e().router_cli ?? "claude"}
+                      onPick={(c) => save(patches.router(c))}
+                    />
+                  </View>
+                </SettingsItem>
+              </Group>
+              <Group title={L("Default models", "默认模型")} hint={L("Used when a task has no pinned CLI and the member has no own setting. Includes Claude, Codex and Cursor.", "任务未指定、成员也未单独设置时使用。含 Claude、Codex、Cursor。")}>
+                <SettingsItem first style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch" }}>
+                  <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                    <Text style={{ fontSize: 15.5, fontWeight: "600", color: colors.text }}>{L("Preference", "偏好顺序")}</Text>
+                    <Text style={{ fontSize: 13.5, lineHeight: 19, color: colors.muted }}>{L("First installed engine in this list runs the task.", "按此列表找本机已安装的引擎来跑任务。")}</Text>
+                  </View>
+                  <Dropdown
+                    testID="cli-preference"
+                    label={L("Model", "模型")}
+                    value={cliLabel(e().preference ?? ["claude", "codex", "cursor"])}
+                    options={view()!.options.clis.map((c) => ({ id: cliKey(c), label: cliLabel(c), detail: cliDetail(c), testID: `cli-preference-${cliKey(c)}` }))}
+                    selected={cliKey(e().preference ?? ["claude", "codex", "cursor"])}
+                    onPick={(k) => { const c = view()!.options.clis.find((x) => cliKey(x) === k); if (c) save(patches.preference(c)); }}
+                  />
+                </SettingsItem>
+              </Group>
               <Group title={L("Members", "成员")} hint={L("Each role on the team. The model decides who does the work; autonomy decides how big a decision needs your input first.", "团队里的每个角色。模型决定由谁来干活，自主程度决定多大的事要先问你。")}>
                 <Each of={e().agents} key={(a) => a.id}>
                   {(a, i) => (
@@ -4238,7 +4285,7 @@ function SaveNote(props: { settings: Settings }) {
 
 const routineValue = (r: { enabled: boolean; every: string }) => (r.enabled ? everyLabel(r.every) : L("Off", "已关闭"));
 
-/** 设置 on a phone: a list of sections; 通知, each member and each routine push pages of their own. */
+/** 设置 on a phone: a list of sections; 通知，each member and each routine push pages of their own. */
 function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen: (r: Route) => void; onDisconnect: () => void }) {
   const { view, error, save } = props.settings;
   props.settings.load();
@@ -4286,6 +4333,22 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       <If when={eff()} else={<Text style={{ paddingHorizontal: 32, fontSize: 14, color: colors.faint }}>{error() ? L("Couldn’t load settings", "设置读取失败") : L("Loading…", "读取中…")}</Text>}>
         {(e) => (
           <View style={{ gap: 28 }}>
+            <Section title={L("Chat assistant", "聊天助手")} hint={L("Engine for instant replies in chat.", "聊天即时回复用的引擎。")}>
+              <Choices
+                label={L("Chat", "聊天")}
+                choices={(view()!.options.routers ?? ["claude", "cursor"]).map((c) => ({ id: c, label: routerLabel(c), testID: `router-cli-${c}` }))}
+                selected={e().router_cli ?? "claude"}
+                onPick={(c) => save(patches.router(c))}
+              />
+            </Section>
+            <Section title={L("Default models", "默认模型")} hint={L("When a task has no pinned CLI.", "任务未指定 CLI 时使用。")}>
+              <Choices
+                label={L("Model", "模型")}
+                choices={view()!.options.clis.map((c) => ({ id: cliKey(c), label: cliLabel(c), testID: `cli-preference-${cliKey(c)}` }))}
+                selected={cliKey(e().preference ?? ["claude", "codex", "cursor"])}
+                onPick={(id) => save(patches.preference(view()!.options.clis.find((c) => cliKey(c) === id)!))}
+              />
+            </Section>
             <Section title={L("Members", "成员")} hint={L("Model: which to use first, and which to switch to on failure or when out of quota. Autonomy: how big a decision needs your input first.", "模型：先用哪个、失败或额度用尽时换哪个；自主程度：多大的事需要先问你。")}>
               <Each of={e().agents} key={(a) => a.id}>
                 {(a, i) => (
@@ -4495,7 +4558,7 @@ function PhoneRoutine(props: { name: string; settings: Settings }) {
 
 // ---------------------------------------------------------------- the team's rules and memory (read-only)
 
-/** 记忆: policies, the owner's memory, each agent's profile and memory, closed decisions. */
+/** 记忆：policies, the owner's memory, each agent's profile and memory, closed decisions. */
 function RulesList(props: { hub: Hub; onOpen: (path: string) => void }) {
   const groups = signal<RuleGroup[] | null>(null);
   const error = signal("");
@@ -4892,7 +4955,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   // List diffs its items by identity: rebuilt rows would read as all replaced on every new message,
   // losing their measurements and the reader's place. Reuse each row while its event is the same.
   type TimelineRow = Row | { key: string; unread: true } | { key: string; more: number } | { key: string; head: string };
-  /** The newest messages shown; older ones wait behind 「加载更早的消息」 so the list stays short. */
+  /** The newest messages shown; older ones wait behind「加载更早的消息」so the list stays short. */
   const PAGE = 200;
   const limit = signal(PAGE);
   let built = new Map<string, TimelineRow>();
@@ -5405,7 +5468,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     const c = choicesOf(e)[n];
     if (c) answer(e.ref!, c);
   }
-  /** 记忆: from the sidebar in place; from settings on top (back returns to settings). */
+  /** 记忆：from the sidebar in place; from settings on top (back returns to settings). */
   const openRules = (fromSettings = false) => {
     if (fromSettings) { drawer.set(false); nav.push({ name: "rules" }); }
     else show({ name: "rules" });

@@ -4,7 +4,7 @@ import { codexMessage } from "./codex-output";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  type Cfg, HOME_DIR, L, P, ROOT, agentActivity, agentName, precedents, readAll, readIf, readTail, recentJournal, signature,
+  type Cfg, HOME_DIR, L, P, ROOT, agentActivity, agentName, cliExecutable, precedents, readAll, readIf, readTail, recentJournal, signature,
 } from "./core";
 import { claudeDisallowed } from "./gates";
 import { channelPrompt } from "./channels";
@@ -180,6 +180,15 @@ export function cliCommand(cli: string, cfg: Cfg, gateOverride = false, mcpArgs:
     cmd.push(...mcpArgs);
     return [...cmd, "-"];
   }
+  if (cli === "cursor") {
+    // Cursor Agent CLI: no Claude-style --disallowedTools; unlocked runs use --force, otherwise sandbox.
+    const bin = cliExecutable("cursor") ?? "cursor-agent";
+    const cmd = [bin, "--print", "--trust", "--output-format", "stream-json"];
+    if (gateOverride) cmd.push("--force");
+    else cmd.push("--sandbox", "enabled");
+    if (c.model) cmd.push("--model", String(c.model));
+    return cmd;
+  }
   throw new Error(`unknown cli ${cli}`);
 }
 
@@ -200,6 +209,16 @@ function toolStep(name: string, input: any): string {
   const i = input ?? {};
   const v = i.description || i.command || i.file_path || i.path || i.pattern || i.url || i.query || i.prompt || "";
   return `${name}${v ? ` · ${String(v).split("\n")[0].slice(0, 120)}` : ""}`;
+}
+
+/** One line describing a Cursor Agent `tool_call` event for "最近在做". */
+export function cursorToolStep(e: { subtype?: string; tool_call?: Record<string, any> }): string | undefined {
+  if (e.subtype !== "started" || !e.tool_call || typeof e.tool_call !== "object") return undefined;
+  const [key, body] = Object.entries(e.tool_call)[0] ?? [];
+  if (!key) return undefined;
+  const name = key.replace(/ToolCall$/, "").replace(/([A-Z])/g, (m) => " " + m.toLowerCase()).trim() || key;
+  const args = body && typeof body === "object" ? (body as any).args ?? body : {};
+  return toolStep(name, args);
 }
 
 /** One stream-json line as it goes into the run log: base64 images (a Read of a screenshot carries each one twice,
@@ -233,6 +252,7 @@ export const RUN_LIMIT = "\n[run-limit]";
  *  environment through its env indirections. */
 export async function mcpLaunch(cli: string, cfg: Cfg, secrets?: Record<string, string>): Promise<{ args: string[]; env: Record<string, string>; file?: string }> {
   if (Array.isArray(cfg.clis?.[cli]?.command)) return { args: [], env: {} };
+  if (cli === "cursor") return { args: [], env: {} }; // Cursor Agent manages its own MCP; do not inject Claude's --mcp-config
   const env = { ...process.env, ...(secrets ?? await sharedSecrets(cfg)) };
   const list = sharedMcp(cfg, env);
   if (!list.length) return { args: [], env: {} };
@@ -250,14 +270,18 @@ export async function mcpLaunch(cli: string, cfg: Cfg, secrets?: Record<string, 
 export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cfg, logFile: string, gateOverride = false,
   extraEnv: Record<string, string> = {}, retryEmpty = true): Promise<string> {
   const mcp = await mcpLaunch(cli, cfg).catch(() => ({ args: [] as string[], env: {} as Record<string, string>, file: undefined }));
-  const cmd = cliCommand(cli, cfg, gateOverride, [...mcp.args, ...(cli === "claude" ? claudeAuthArgs(extraEnv) : [])]);
+  const base = cliCommand(cli, cfg, gateOverride, [...mcp.args, ...(cli === "claude" ? claudeAuthArgs(extraEnv) : [])]);
+  // Cursor takes the prompt as a CLI argument (no stdin prompt mode); Claude/Codex read the prompt on stdin.
+  const cmd = cli === "cursor" ? [...base, prompt] : base;
   const timeoutMs = (cfg.clis?.timeout_minutes ?? 60) * 60_000;
   const stallMs = (cfg.clis?.stall_minutes ?? 20) * 60_000;
   const dir = cwd.replace(/^~/, homedir());
   // before the spawn: a throw after it would leave the agent running with no timeout, stall watch or drained pipes
   mkdirSync(P("logs", "runs"), { recursive: true });
+  const workDir = existsSync(dir) ? dir : ROOT;
+  if (cli === "cursor" && !base.includes("--workspace")) cmd.splice(1, 0, "--workspace", workDir);
   const proc = Bun.spawn(cmd, {
-    cwd: existsSync(dir) ? dir : ROOT, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
+    cwd: workDir, stdin: cli === "cursor" ? "ignore" : new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     // Claude -p stops background subagents 10 min after the last turn; our own run limit bounds the run instead
     env: { ...process.env, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", ...mcp.env, ...extraEnv, HUB_DATA: ROOT },
   });
@@ -266,8 +290,9 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   if (tid) agentProcs.set(tid, proc);
   void proc.exited.then(() => { if (tid && agentProcs.get(tid) === proc) agentProcs.delete(tid); });
 
-  // what the agent is doing: every chunk of output is a sign of life; Claude's stream also names each step
+  // what the agent is doing: every chunk of output is a sign of life; Claude/Cursor streams also name each step
   const codexJson = cli === "codex" && cmd.includes("--json");
+  const cursorJson = cli === "cursor" && cmd.includes("stream-json");
   const json = cmd.includes("stream-json") || codexJson;
   const act = { at: Date.now(), step: undefined as string | undefined, steps: 0, model: startModel(cli, cmd, extraEnv.CODEX_HOME) };
   const inFlight = new Map<string, string>(); // tool_use id → tool name, until its result comes back
@@ -283,6 +308,22 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
     if (codexJson) {
       const text = codexMessage(e);
       if (text !== undefined) assistantText += text + "\n\n";
+      return;
+    }
+    if (cursorJson) {
+      if (e.type === "system" && e.subtype === "init" && e.model) act.model = String(e.model);
+      if (e.type === "tool_call") {
+        const step = cursorToolStep(e);
+        if (e.subtype === "started" && step) {
+          inFlight.set(String(e.call_id ?? act.steps), step);
+          act.step = step; act.steps++;
+        } else if (e.subtype === "completed" && e.call_id) inFlight.delete(String(e.call_id));
+      } else if (e.type === "assistant") {
+        for (const c of e.message?.content ?? []) if (c.type === "text") assistantText += c.text;
+      } else if (e.type === "result") {
+        const text = typeof e.result === "string" ? e.result : "";
+        resultText = resultText === undefined ? text : `${resultText}\n\n${text}`;
+      }
       return;
     }
     if (e.type === "system" && e.subtype === "init" && e.model) act.model = String(e.model);
@@ -434,17 +475,27 @@ function repairJson(json: string): string {
 
 /** The models that route each owner message, fastest first: a choice made within seconds, not a judgement.
  * `[router] cli/model` in config.toml puts one first; the others are fallbacks when its CLI is missing or fails. */
-const ROUTERS = [{ cli: "claude", model: "claude-haiku-5-5" }, { cli: "codex", model: "gpt-6-luna" }];
+const ROUTERS = [
+  { cli: "claude", model: "claude-haiku-5-5" },
+  { cli: "codex", model: "gpt-6-luna" },
+  { cli: "cursor", model: "" },
+];
 
 /** One quick structured call for routing (the fastest model available); null when none answered. */
 export async function quickAsk(prompt: string, cfg: Cfg, logFile: string): Promise<any> {
   const own = cfg.router?.cli ? [{ cli: String(cfg.router.cli), model: String(cfg.router.model ?? "") }] : [];
   for (const r of [...own, ...ROUTERS.filter((x) => x.cli !== own[0]?.cli)]) {
-    if (!Bun.which(r.cli)) continue;
+    if (!cliExecutable(r.cli) && !Bun.which(r.cli)) continue;
     const cmd = r.cli === "claude"
       ? ["claude", "-p", "--output-format", "text", "--tools", "", "--strict-mcp-config", ...(r.model ? ["--model", r.model] : [])]
+      : r.cli === "cursor"
+        ? [cliExecutable("cursor") ?? "cursor-agent", "--print", "--mode", "ask", "--trust", "--output-format", "text", ...(r.model ? ["--model", r.model] : []), prompt]
       : ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", ...(r.model ? ["-m", r.model] : []), "-c", 'model_reasoning_effort="low"', "-"];
-    const proc = Bun.spawn(cmd, { cwd: ROOT, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(cmd, {
+      cwd: ROOT,
+      stdin: r.cli === "cursor" ? "ignore" : new Blob([prompt]),
+      stdout: "pipe", stderr: "pipe",
+    });
     const timer = setTimeout(() => proc.kill("SIGKILL"), (cfg.router?.timeout_seconds ?? 45) * 1000);
     const out = await new Response(proc.stdout).text();
     await proc.exited;
@@ -460,10 +511,17 @@ export async function quickAsk(prompt: string, cfg: Cfg, logFile: string): Promi
 /** One-shot structured call (used by the judge). */
 export async function ask(prompt: string, cfg: Cfg, logFile: string): Promise<any> {
   const cli = cfg.judge?.cli ?? "claude";
+  const model = cfg.judge?.model;
   const cmd = cli === "claude"
-    ? ["claude", "-p", "--output-format", "text", "--model", cfg.judge?.model ?? "claude-opus-5-5", "--tools", ""]
+    ? ["claude", "-p", "--output-format", "text", "--model", model ?? "claude-opus-5-5", "--tools", ""]
+    : cli === "cursor"
+      ? [cliExecutable("cursor") ?? "cursor-agent", "--print", "--mode", "ask", "--trust", "--output-format", "text", ...(model ? ["--model", String(model)] : []), prompt]
     : ["codex", "exec", "--skip-git-repo-check", "-"];
-  const proc = Bun.spawn(cmd, { cwd: ROOT, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn(cmd, {
+    cwd: ROOT,
+    stdin: cli === "cursor" ? "ignore" : new Blob([prompt]),
+    stdout: "pipe", stderr: "pipe",
+  });
   const timer = setTimeout(() => proc.kill("SIGKILL"), (cfg.judge?.timeout_minutes ?? 10) * 60_000); // runs inside locked()
   const out = await new Response(proc.stdout).text();
   await proc.exited;

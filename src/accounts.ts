@@ -5,7 +5,7 @@
 import { existsSync, statSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { type Cfg, L, hostName, journal, HOME_DIR } from "./core";
+import { type Cfg, AGENT_CLIS, L, cliInstalled, defaultPreference, hostName, journal, HOME_DIR } from "./core";
 import { notify } from "./notify";
 import { cachedSecrets } from "./secrets";
 
@@ -134,15 +134,13 @@ export function pickAccount(cfg: Cfg, clis: string[]): Account | null {
   return null;
 }
 
-const OTHER_CLI: Record<string, string> = { claude: "codex", codex: "claude" };
-
 /** After `failed` hit a quota/login wall (or nothing in `wanted` is usable when failed is null):
- *  another usable account of the same CLI first, else the other CLI (codex <-> claude) — for any agent. */
-export function failoverAccount(cfg: Cfg, failed: Account | null, wanted: string[], installed: (cli: string) => boolean = (c) => !!Bun.which(c)): Account | null {
+ *  another usable account of the same CLI first, else any other preferred agent CLI. */
+export function failoverAccount(cfg: Cfg, failed: Account | null, wanted: string[], installed: (cli: string) => boolean = cliInstalled): Account | null {
   const same = failed ? [failed.cli] : wanted;
   const first = same.filter(installed);
   for (const cli of first) for (const a of accounts(cfg, cli)) if (usable(a) && !(failed && key(a) === key(failed))) return a;
-  const others = [...new Set(same.map((c) => OTHER_CLI[c]).filter((c) => c && !first.includes(c) && installed(c)))];
+  const others = defaultPreference(cfg).filter((c) => !first.includes(c) && installed(c));
   return pickAccount(cfg, others);
 }
 
@@ -226,11 +224,13 @@ export async function reportFailure(a: Account, kind: Failure, output: string, c
     if (st.told !== st.cooldown_until) {
       st.told = st.cooldown_until;
       const same = accounts(cfg, a.cli).filter((other) => key(other) !== key(a) && usable(other)).map((other) => `${other.cli}/${other.name}`);
-      const others = [...same, ...(cfg.clis?.preference ?? ["claude", "codex"]).filter((c: string) => c !== a.cli && Bun.which(c) && accounts(cfg, c).some(usable))];
+      const others = [...same, ...defaultPreference(cfg).filter((c: string) => c !== a.cli && cliInstalled(c) && accounts(cfg, c).some(usable))];
       const at = new Date(st.cooldown_until).toLocaleTimeString(L("en-US", "zh-CN"), { hour: "2-digit", minute: "2-digit" });
-      void notify([L(`${a.cli === "claude" ? "Claude" : "Codex"} (${host}) is out of quota, back around ${at}.`, `${a.cli === "claude" ? "Claude" : "Codex"}（${host}）额度用完了，约 ${at} 恢复。`),
+      const label = a.cli === "claude" ? "Claude" : a.cli === "codex" ? "Codex" : "Cursor";
+      const loginHint = a.cli === "claude" ? "claude /login" : a.cli === "codex" ? "codex login" : "agent login";
+      void notify([L(`${label} (${host}) is out of quota, back around ${at}.`, `${label}（${host}）额度用完了，约 ${at} 恢复。`),
         others.length ? L(`Until then tasks go to ${others.join(", ")}.`, `这期间任务先交给 ${others.join("、")} 做。`) : L("No AI is available until then, tasks will queue.", "这期间没有可用的 AI，任务会排队等着。"),
-        L(`To recover now: run ${a.cli === "claude" ? "claude /login" : "codex login"} on this machine to switch account; it is picked up automatically.`, `想马上恢复：在这台机器上运行 ${a.cli === "claude" ? "claude /login" : "codex login"} 换个账号，登录后会自动接着用，不用等。`)].join("\n"),
+        L(`To recover now: run ${loginHint} on this machine to switch account; it is picked up automatically.`, `想马上恢复：在这台机器上运行 ${loginHint} 换个账号，登录后会自动接着用，不用等。`)].join("\n"),
         cfg, { kind: "notice" });
     }
   } else if (gateway) {
@@ -272,8 +272,7 @@ export async function reportNetworkBlock(cfg: Cfg, host: string) {
 }
 
 async function alertIfAllExhausted(cfg: Cfg) {
-  const clis: string[] = cfg.clis?.preference ?? ["claude", "codex"];
-  const installed = clis.filter((c) => Bun.which(c));
+  const installed = defaultPreference(cfg).filter(cliInstalled);
   if (pickAccount(cfg, installed)) return;
   const s = load();
   const last = s.alerted?.all ? Date.parse(s.alerted.all) : 0;
@@ -389,9 +388,10 @@ export function loginBackoffMs(fails: number): number {
 const lastLoginTry = new Map<string, number>();
 export async function retryLogins(cfg: Cfg) {
   const s = load();
-  for (const cli of ["claude", "codex"]) for (const a of accounts(cfg, cli)) {
+  for (const cli of AGENT_CLIS) for (const a of accounts(cfg, cli)) {
     const st = s.accounts[key(a)];
-    if (!st?.needs_login || pending.size || !Bun.which(cli)) continue;
+    if (!st?.needs_login || pending.size || !cliInstalled(cli)) continue;
+    if (cli === "cursor") continue; // Cursor uses `agent login` / CURSOR_API_KEY; no OAuth code flow here
     if (usesGateway(a)) {
       // A gateway account signs in with its gateway token; setup-token can never finish. Clear a stale flag
       // (left by an older build) and let the next task try instead of sending another dead link.
@@ -413,7 +413,7 @@ export async function retryLogins(cfg: Cfg) {
 /** Structured account states for this machine (the app's machine page). */
 export function accountsInfo(cfg: Cfg): { cli: string; name: string; state: "ok" | "cooldown" | "login"; until?: string }[] {
   const s = load();
-  return ["claude", "codex"].filter((c) => Bun.which(c)).flatMap((c) => accounts(cfg, c)).map((a) => {
+  return AGENT_CLIS.filter(cliInstalled).flatMap((c) => accounts(cfg, c)).map((a) => {
     const st = s.accounts[key(a)] ?? {};
     const cool = !!st.cooldown_until && Date.parse(st.cooldown_until) > Date.now();
     return { cli: a.cli, name: a.name, state: st.needs_login ? "login" : cool ? "cooldown" : "ok", until: cool ? st.cooldown_until : undefined };
@@ -422,7 +422,7 @@ export function accountsInfo(cfg: Cfg): { cli: string; name: string; state: "ok"
 
 export function accountsStatus(cfg: Cfg): string[] {
   const s = load();
-  return ["claude", "codex"].filter((c) => Bun.which(c)).flatMap((c) => accounts(cfg, c)).map((a) => {
+  return AGENT_CLIS.filter(cliInstalled).flatMap((c) => accounts(cfg, c)).map((a) => {
     const st = s.accounts[key(a)] ?? {};
     const state = st.needs_login ? "needs login" : st.cooldown_until && Date.parse(st.cooldown_until) > Date.now()
       ? `cooldown → ${new Date(st.cooldown_until).toLocaleTimeString()}` : "ok";

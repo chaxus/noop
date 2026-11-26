@@ -185,11 +185,37 @@ export type TaskOpts = {
   extra?: Record<string, string>;
 };
 
+/** Agent CLIs that can run tasks or the chat brain (Settings / preference / task `cli`). */
+export const AGENT_CLIS = ["claude", "codex", "cursor"] as const;
+export type AgentCli = (typeof AGENT_CLIS)[number];
+export const isAgentCli = (c: unknown): c is AgentCli => typeof c === "string" && (AGENT_CLIS as readonly string[]).includes(c);
+
+/** Absolute path of the binary for an agent CLI, or null when it is not on PATH. Cursor uses `cursor-agent` or `agent`. */
+export function cliExecutable(cli: string): string | null {
+  if (cli === "cursor") return Bun.which("cursor-agent") ?? Bun.which("agent");
+  return Bun.which(cli);
+}
+
+export const cliInstalled = (cli: string) => cliExecutable(cli) !== null;
+
+/** Agent CLIs present on this machine, in AGENT_CLIS order. */
+export function installedClis(): string[] {
+  return AGENT_CLIS.filter(cliInstalled);
+}
+
+/** Task/brain CLI order: `[clis] preference` when set, otherwise every known agent (chooseCli then picks the first installed). */
+export function defaultPreference(cfg: Cfg): string[] {
+  const pref = cfg.clis?.preference;
+  if (Array.isArray(pref) && pref.length) return pref.map(String).filter(isAgentCli);
+  return [...AGENT_CLIS];
+}
+
 /** Capabilities of this machine: os:<linux|macos|windows>, host:<name>, plus config [host].caps (e.g. gpu, docker, home). */
 export function hostCaps(cfg: Cfg): string[] {
   const os = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
-  const clis = ["claude", "codex", "gh", "cargo", "bun", "node"].filter((c) => Bun.which(c)).map((c) => `cli:${c}`);
-  return [`os:${os}`, `host:${hostName(cfg)}`, `arch:${process.arch}`, ...clis, ...(cfg.host?.caps ?? [])];
+  const tools = ["gh", "cargo", "bun", "node"].filter((c) => Bun.which(c)).map((c) => `cli:${c}`);
+  const agents = installedClis().map((c) => `cli:${c}`);
+  return [`os:${os}`, `host:${hostName(cfg)}`, `arch:${process.arch}`, ...agents, ...tools, ...(cfg.host?.caps ?? [])];
 }
 
 /** One requirement; "a|b" means either cap will do (e.g. cli:bun|cli:node). */
@@ -246,15 +272,15 @@ export const which = (bin: string) => Bun.which(bin) !== null;
  *  2. the owner's per-member config (Settings → Members → `clis.agents`): policy for that agent, not a suggestion;
  *  3. `cli_hint`, what the planner (an AI call, see planInbox) suggested for this task — a hint, so it may not
  *     override policy. It used to be written into `cli`, which made every planned task look owner-pinned;
- *  4. otherwise either CLI, Claude first.
+ *  4. otherwise `[clis] preference`, or claude → codex → cursor.
  *  The per-member config is checked before the hint on purpose: an owner who sets a member to codex-only in the app
  *  must not have that silently undone by the planner picking Claude for a task it calls "hard". */
 export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
   if (meta.cli && meta.cli !== "auto") return [meta.cli];
   const per = cfg.clis?.agents?.[meta.agent || "lead"];
   if (Array.isArray(per) && per.length) return per;
-  if (meta.cli_hint === "claude" || meta.cli_hint === "codex") return [meta.cli_hint];
-  return ["claude", "codex"];
+  if (isAgentCli(meta.cli_hint)) return [meta.cli_hint];
+  return defaultPreference(cfg);
 }
 
 /** What the planner may write back about the CLI: only a `cli_hint`, and only when the task is not pinned and its
@@ -263,18 +289,18 @@ export function allowedClis(meta: Record<string, string>, cfg: Cfg): string[] {
  *  would narrow allowedClis to a CLI nobody can run, and the task would sit in the inbox forever. */
 export function cliHintPatch(meta: Record<string, string>, per: unknown, suggestion: unknown, available: string[]): Record<string, string> {
   const pinned = meta.cli && meta.cli !== "auto";
-  const hint = suggestion === "claude" || suggestion === "codex" ? suggestion : "";
+  const hint = isAgentCli(suggestion) ? suggestion : "";
   if (pinned || (Array.isArray(per) && per.length) || !hint || !available.includes(hint)) return {};
   return { cli_hint: hint };
 }
 
-/** The agent CLIs (claude, codex) installed on at least one of these hosts, read from their `cli:*` caps. */
+/** The agent CLIs installed on at least one of these hosts, read from their `cli:*` caps. */
 export function fleetClis(caps: string[][]): string[] {
-  return ["claude", "codex"].filter((c) => caps.some((cs) => cs.includes(`cli:${c}`)));
+  return AGENT_CLIS.filter((c) => caps.some((cs) => cs.includes(`cli:${c}`)));
 }
 
 export function chooseCli(meta: Record<string, string>, cfg: Cfg): string | null {
-  return allowedClis(meta, cfg).find(which) ?? null;
+  return allowedClis(meta, cfg).find(cliInstalled) ?? null;
 }
 
 // ------------------------------------------------------------------ fleet presence (heartbeats)
@@ -290,7 +316,7 @@ export type Activity = { at: string; step?: string; steps: number;
 /** This process's running agents (written by runAgent, published in the heartbeat). */
 export const agentActivity = new Map<string, Activity>();
 
-/** One host's progress on an update request (`at` names the request), shown per machine in Settings › 版本. */
+/** One host's progress on an update request (`at` names the request), shown per machine in Settings › 版本。*/
 export type UpdateState = {
   at: string; ts: string;
   state: "updating" | "waiting" | "restarting" | "deploying" | "done" | "current" | "failed";

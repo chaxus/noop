@@ -111,8 +111,14 @@ export function createDemoHub(opts: { now?: () => number; pace?: number } = {}) 
         ],
         max_parallel: 3,
         media_days: 30,
+        router_cli: "claude",
+        preference: ["claude", "codex", "cursor"],
       },
-      options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
+      options: {
+        clis: [["claude"], ["codex"], ["cursor"], ["codex", "claude"], ["claude", "codex"], ["cursor", "claude"], ["claude", "cursor"]],
+        routers: ["claude", "cursor"],
+        autonomy: ["onboarding", "assisted", "autonomous"],
+      },
     };
 
     // yesterday and today in the main chat

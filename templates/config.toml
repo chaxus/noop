@@ -33,19 +33,32 @@ stale_repo_days = 7                   # target/ of repos (and, on macOS, Xcode D
 
 [clis]
 # Which CLI runs a task, strongest first: a `cli` pinned on the task (`noop add --cli …`, a routine's cli) > the
-# owner's per-member config below (Settings → Members) > the planner's per-task suggestion > either, Claude first.
+# owner's per-member config below (Settings → Members) > the planner's per-task suggestion > preference below.
 # Claude Opus = challenging work (development, debugging, architecture, UI, judge, learning, evolution).
-# Codex (ChatGPT) = routine work. The planner only suggests, so it can never override a member pinned here.
+# Codex (ChatGPT) = routine work. Cursor Agent = optional third engine (`cursor-agent` / `agent` on PATH).
+# The planner only suggests, so it can never override a member pinned here.
+# preference = ["cursor"]              # cursor-only fleets; default order is claude → codex → cursor
+# preference = ["cursor", "claude"]
 timeout_minutes = 90
 # Runs of 30+ minutes reserve 10 minutes for checkpoint recovery by default. Set 0 to disable or another value to override.
 # checkpoint_minutes = 10
 [clis.agents]
 # reviewer = ["codex", "claude"]      # per-member order; ["codex"] = codex only (unless codex has no usable account)
+# lead = ["cursor"]
 [clis.claude]
 permission_mode = "bypassPermissions" # hard gates still apply via --disallowedTools (src/gates.ts)
 model = "claude-opus-5-5"
 [clis.codex]
 # model = "gpt-5.5-codex"
+[clis.cursor]
+# model = "gpt-5"                     # passed to `cursor-agent --model …` when set
+
+# Chat brain (browser / app instant replies). Same CLIs as tasks; defaults to Claude Haiku.
+# [router]
+# cli = "cursor"                      # or "claude"
+# model = ""                          # Cursor: omit for account default; Claude: e.g. claude-haiku-5-5
+# timeout_seconds = 45
+# fallback = []                       # extra model names on the same cli; Claude default includes sonnet
 
 [autonomy]
 level = "onboarding"                  # onboarding → assisted → autonomous. Only the owner changes this

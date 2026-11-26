@@ -27,12 +27,12 @@ import { githubStarved } from "./github";
 import { sharedSecrets } from "./secrets";
 import { doctor, visual } from "./visual";
 import { ackInbound, answerFromChat, appendEvent, cancelTask, feed, handleOwnerMessage, mediaDays, pendingInbound, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as hubStatus } from "./server";
-import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel, FallbackModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
+import { addFollowUp, reopenTask, routeWithoutModel, type BrainOut, ClaudeModel, CursorModel, FallbackModel, routerModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
 import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
 import { adoptCloudUrl, readHubToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, retireUnrunnableCopy, retireUnrunnableProposed, routineParkedOnDecision, routineQueued, routinesAwaitingApproval, supersedeProposed } from "./autonomy";
-import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliHintPatch, fleetClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
+import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, cliExecutable, cliHintPatch, fleetClis, installedClis, capOk, idTagFor, isPrimary, isCloudDeployHost, knownHostCaps, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, networkBlocked, pendingLoginIds, pickAccount, reportFailure, reportNetworkBlock, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
 import { shellBash } from "./shell";
@@ -849,7 +849,7 @@ export async function tick(cfg: Cfg, background = false) {
     const s = sample(cfg);
     const max = allowedParallel(s, cfg, running);
     if (running >= max) break;
-    if (!pickAccount(cfg, ["claude", "codex"].filter((c) => Bun.which(c)))) break;
+    if (!pickAccount(cfg, installedClis())) break;
     if ((await githubStarved(cfg)).starved && list(P("tasks", "inbox"), /^T-.*\.md$/).every((p) => GH_HEAVY.has(readDoc(p).meta.agent))) break;
     const t = pickTask(cfg, pressureOf(s), canRunHeavy(s, cfg, running));
     if (!t) break;
@@ -899,7 +899,7 @@ For each task decide:
 - channels: zero to three slugs from the channel goals below, or {"name":"...","goal":"..."} for a new work topic.
 - requires: host capabilities it truly needs, comma-separated, from the hosts' caps below (e.g. "os:macos" for iOS/macOS builds,
   simulators or screenshots; "os:windows"; "" when any host will do). Only require what the work cannot be done without.
-- cli: "claude" for engineering, debugging, design, UI or judgement; "codex" for routine triage, monitoring, reports, first-pass reviews.
+- cli: "claude" for engineering, debugging, design, UI or judgement; "codex" for routine triage, monitoring, reports, first-pass reviews; "cursor" when Cursor Agent is preferred or is what this fleet has.
   A suggestion only — never pick against an agent's fixed CLI below. Installed in this fleet: ${clis.join(", ") || "(unknown)"}; never suggest another.
 - difficulty: "hard" or "normal".
 ${fixed.size ? `\nAgent CLI (the owner's setting — not yours to change):\n${[...fixed].map(([a, c]) => `- ${a}: fixed to ${c.join(" → ")} (leave cli out)`).join("\n")}\n` : ""}
@@ -912,7 +912,7 @@ ${hosts || "(unknown)"}
 Tasks:
 ${todo.map((t) => `- ${t.meta.id} [agent ${t.meta.agent}${t.meta.requires ? `, already requires ${t.meta.requires}` : ""}]: ${t.meta.title} — ${t.body.slice(0, 500).replace(/\s+/g, " ")}`).join("\n")}
 
-Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": "claude" or omitted, "difficulty": "normal", "channels": []}, ...}`,
+Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": "claude"|"codex"|"cursor" or omitted, "difficulty": "normal", "channels": []}, ...}`,
     cfg, P("logs", "runs", `plan-${Date.now()}.log`));
   if (!r || typeof r !== "object") return; // planner unavailable: tasks run unplanned after plan_wait_minutes
   await locked(async () => {
@@ -923,7 +923,6 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
       const req = [...new Set([...(t.meta.requires ?? "").split(","), ...String(v.requires ?? "").split(",")].map((x) => x.trim()).filter(Boolean))].join(",");
       const pinned = t.meta.cli && t.meta.cli !== "auto";
       const per = fixed.get(t.meta.agent || "lead");
-      const hint = v.cli === "codex" || v.cli === "claude" ? v.cli : "";
       const channelSlugs = [...new Set([...(t.meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(v.channels)])].join(",");
       writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req,
         ...cliHintPatch(t.meta, per, v.cli, clis),
@@ -1070,14 +1069,12 @@ async function daemon(cfg: Cfg) {
     },
   });
   setApplyOp((op) => runTool(store, op?.tool, op));
-  // the chat model, then fallbacks (router.fallback: model names, default Sonnet): a stuck or out-of-quota model no longer
+  // the chat model (router.cli: claude | cursor), then optional fallbacks: a stuck or out-of-quota model no longer
   // turns the owner's message into a "chat assistant unavailable" note while another model would have answered
-  const routerCli = String(cfg.router?.cli ?? "claude"), routerTimeout = (cfg.router?.timeout_seconds ?? 45) * 1000;
-  const primaryModel = new ClaudeModel(String(cfg.router?.model ?? "claude-haiku-5-5"), routerCli, routerTimeout);
-  const fallbackNames: string[] = Array.isArray(cfg.router?.fallback) ? cfg.router.fallback.map(String) : ["claude-sonnet-5-5"];
-  const model = new FallbackModel([primaryModel, ...fallbackNames.map((n) => new ClaudeModel(n, routerCli, routerTimeout))],
-    (from, err) => console.error(`chat brain: model ${from === 0 ? String(cfg.router?.model ?? "claude-haiku-5-5") : fallbackNames[from - 1]} failed (${err}); trying the next one`));
-  if (isPrimary(cfg, host) && Bun.which(routerCli)) primaryModel.warm(systemPrompt());
+  const routerCli = String(cfg.router?.cli ?? "claude");
+  const model = routerModel(cfg);
+  const routerReady = routerCli === "cursor" ? !!cliExecutable("cursor") : !!Bun.which("claude");
+  if (isPrimary(cfg, host) && routerReady) (model as { warm?: (s: string) => void }).warm?.(systemPrompt());
   if (isPrimary(cfg, host)) startServer(cfg, async (text, { reply, answered, sentAt, thread, channel }) => {
     const got = Date.now();
     const room = channel ? channels().find((c) => c.slug === channel) : undefined;
@@ -1292,7 +1289,7 @@ const HELP = `Noop — your own AI team
 
   noop tasks                  the work queue, routines waiting for approval and open decisions
   noop tick                   one cycle: pull → routines → replies → judge → run tasks → push
-  noop add "title" [-b body] [-a agent] [-r os:linux (hard)] [--prefer os:macos (soft)] [-w heavy] [--host name] [--repo ~/work/x] [-p high] [--cli claude|codex]
+  noop add "title" [-b body] [-a agent] [-r os:linux (hard)] [--prefer os:macos (soft)] [-w heavy] [--host name] [--repo ~/work/x] [-p high] [--cli claude|codex|cursor]
   noop decide D-0001 "A"      answer a decision from the terminal
   noop learn [--full] [--dry]  learn the CEO from local Claude/Codex sessions (digest stays local; principles go to memory)
   noop metrics [days]         per-agent success, judge vs owner decisions (feeds self-evolution)
